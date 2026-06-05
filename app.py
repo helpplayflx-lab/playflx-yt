@@ -16,7 +16,7 @@ templates = Jinja2Templates(directory="templates")
 # =====================================================================================
 # HOME PAGE
 # =====================================================================================
-@app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
+@app.get("/", response_class=HTMLResponse)
 async def home():
     return HTMLResponse(content="""<!DOCTYPE html>
 <html lang="en">
@@ -190,60 +190,186 @@ async def get_video(video_id: str):
         }, status_code=400)
 
 # =====================================================================================
-# WATCH PAGE (EMBED)
+# DYNAMIC WATCH PAGE - AUTO-REFRESH PLAYER
 # =====================================================================================
 @app.get("/watch/{video_id}", response_class=HTMLResponse)
 async def watch_page(request: Request, video_id: str):
+    """Dynamic player — auto-updates link on every visit"""
     return HTMLResponse(content=f"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Watch - PlayFlx</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>PlayFlx Player</title>
+    <link href="https://vjs.zencdn.net/8.10.0/video-js.css" rel="stylesheet" />
     <style>
-        body {{ background: #000; color: white; font-family: system-ui; }}
-        .container {{ max-width: 1000px; margin: 0 auto; padding: 20px; }}
-        .player-box {{ background: #111; border-radius: 16px; overflow: hidden; }}
-        .info-box {{ background: #1a1a1a; border-radius: 12px; padding: 20px; margin-top: 20px; }}
-        .btn {{ padding: 12px 25px; border-radius: 8px; font-weight: 600; cursor: pointer; border: none; }}
-        .btn-primary {{ background: #6366f1; color: white; }}
+        * {{ margin:0; padding:0; box-sizing:border-box; }}
+        body {{ background:#000; font-family:system-ui; }}
+        #player-wrapper {{ width:100vw; height:100vh; display:flex; align-items:center; justify-content:center; position:relative; }}
+        .video-js {{ width:100%; height:100%; }}
+        
+        .status-overlay {{ position:fixed; top:50%; left:50%; transform:translate(-50%,-50%); color:white; text-align:center; z-index:20; pointer-events:none; }}
+        .spinner {{ width:40px; height:40px; border:3px solid rgba(255,255,255,0.2); border-top:3px solid #6366f1; border-radius:50%; animation:spin 0.8s linear infinite; margin:0 auto 15px; }}
+        @keyframes spin {{ to {{ transform:rotate(360deg); }} }}
+        
+        .controls-bar {{ position:fixed; bottom:20px; right:20px; z-index:30; display:flex; gap:8px; opacity:0.5; transition:opacity 0.3s; }}
+        .controls-bar:hover {{ opacity:1; }}
+        .ctrl-btn {{ background:rgba(0,0,0,0.8); color:white; border:1px solid rgba(255,255,255,0.2); padding:10px 16px; border-radius:25px; cursor:pointer; font-size:12px; transition:all 0.2s; }}
+        .ctrl-btn:hover {{ background:rgba(99,102,241,0.8); border-color:#6366f1; }}
+        
+        .toast {{ position:fixed; top:20px; left:50%; transform:translateX(-50%); background:#22c55e; color:white; padding:10px 25px; border-radius:25px; font-size:14px; z-index:50; display:none; animation:fadeInOut 2s; }}
+        @keyframes fadeInOut {{ 0%{{opacity:0;top:0}} 20%{{opacity:1;top:20px}} 80%{{opacity:1;top:20px}} 100%{{opacity:0;top:0}} }}
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1 class="text-2xl font-bold my-4">▶️ PlayFlx Player</h1>
-        
-        <div class="player-box">
-            <iframe width="100%" height="500" 
-                    src="https://www.youtube.com/embed/{video_id}?autoplay=0&rel=0&modestbranding=1"
-                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                    allowfullscreen style="border:none;">
-            </iframe>
+    <div id="player-wrapper">
+        <div class="status-overlay" id="status">
+            <div class="spinner"></div>
+            <p id="statusText">Loading fresh stream...</p>
         </div>
         
-        <div class="info-box">
-            <h2 class="text-xl font-semibold mb-3">📋 Share Links</h2>
-            
-            <div class="mb-3">
-                <label class="text-sm text-gray-400">Permanent Link:</label>
-                <div class="flex gap-2 mt-1">
-                    <input type="text" value="{BASE_URL}/watch/{video_id}" class="bg-gray-800 border border-gray-700 text-white p-2 rounded w-full font-mono text-sm" readonly>
-                    <button class="btn btn-primary" onclick="navigator.clipboard.writeText('{BASE_URL}/watch/{video_id}')">Copy</button>
-                </div>
-            </div>
-            
-            <a href="/api/video/{video_id}" class="text-indigo-400 hover:underline text-sm">📡 Get Direct MP4 API</a>
+        <video id="player" class="video-js vjs-big-play-centered" controls playsinline style="display:none;"></video>
+        
+        <div id="errorBox" style="display:none;color:white;text-align:center;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);">
+            <p style="font-size:18px;margin-bottom:15px;">⚠️ Stream expired</p>
+            <button onclick="loadFreshStream()" style="padding:12px 30px;background:#6366f1;color:white;border:none;border-radius:25px;cursor:pointer;font-weight:600;">🔄 Get Fresh Link</button>
         </div>
     </div>
+    
+    <div class="controls-bar">
+        <button class="ctrl-btn" onclick="copyCurrentLink()">📋 Copy Link</button>
+        <button class="ctrl-btn" onclick="loadFreshStream()">🔄 Refresh</button>
+    </div>
+    
+    <div class="toast" id="toast"></div>
+
+    <script src="https://vjs.zencdn.net/8.10.0/video.min.js"></script>
+    <script>
+        const VIDEO_ID = '{video_id}';
+        const API_URL = '/api/video/' + VIDEO_ID;
+        let player = null;
+        let currentMP4 = '';
+        let refreshTimer = null;
+
+        async function loadFreshStream() {{
+            if (refreshTimer) clearTimeout(refreshTimer);
+            
+            document.getElementById('status').style.display = 'block';
+            document.getElementById('statusText').textContent = 'Fetching fresh stream...';
+            document.getElementById('player').style.display = 'none';
+            document.getElementById('errorBox').style.display = 'none';
+            
+            try {{
+                const response = await fetch(API_URL + '?t=' + Date.now());
+                const data = await response.json();
+                
+                if (data.success && data.mp4_url) {{
+                    currentMP4 = data.mp4_url;
+                    document.title = data.title || 'PlayFlx Player';
+                    
+                    if (player) {{
+                        player.dispose();
+                        player = null;
+                    }}
+                    
+                    document.getElementById('status').style.display = 'none';
+                    document.getElementById('player').style.display = 'block';
+                    
+                    player = videojs('player', {{
+                        controls: true,
+                        autoplay: true,
+                        preload: 'auto',
+                        fluid: true,
+                        playbackRates: [0.5, 0.75, 1, 1.25, 1.5, 2],
+                        sources: [{{ src: currentMP4, type: 'video/mp4' }}]
+                    }});
+                    
+                    player.ready(function() {{
+                        player.play().catch(() => {{}});
+                        
+                        const savedTime = sessionStorage.getItem('time_' + VIDEO_ID);
+                        if (savedTime) {{
+                            player.currentTime(parseFloat(savedTime));
+                            sessionStorage.removeItem('time_' + VIDEO_ID);
+                        }}
+                    }});
+                    
+                    player.on('error', function() {{
+                        console.log('Stream expired, auto-refreshing...');
+                        showToast('Stream expired. Getting new link...');
+                        loadFreshStream();
+                    }});
+                    
+                    player.on('timeupdate', function() {{
+                        sessionStorage.setItem('time_' + VIDEO_ID, player.currentTime());
+                    }});
+                    
+                    refreshTimer = setTimeout(function() {{
+                        console.log('Auto-refreshing stream...');
+                        showToast('Auto-refreshing stream...');
+                        loadFreshStream();
+                    }}, 5 * 60 * 60 * 1000);
+                    
+                    showToast('✅ Fresh stream loaded!');
+                    
+                }} else {{
+                    throw new Error('No MP4 URL received');
+                }}
+            }} catch(e) {{
+                console.error('Load error:', e);
+                document.getElementById('status').style.display = 'none';
+                document.getElementById('errorBox').style.display = 'block';
+                
+                setTimeout(loadFreshStream, 5000);
+            }}
+        }}
+
+        function copyCurrentLink() {{
+            if (currentMP4) {{
+                navigator.clipboard.writeText(currentMP4).then(() => {{
+                    showToast('📋 MP4 Link copied!');
+                }});
+            }} else {{
+                showToast('⏳ Wait for stream to load...');
+            }}
+        }}
+
+        function showToast(message) {{
+            const toast = document.getElementById('toast');
+            toast.textContent = message;
+            toast.style.display = 'block';
+            toast.style.animation = 'none';
+            toast.offsetHeight;
+            toast.style.animation = 'fadeInOut 2s';
+            setTimeout(() => toast.style.display = 'none', 2000);
+        }}
+
+        document.addEventListener('keydown', function(e) {{
+            switch(e.key.toLowerCase()) {{
+                case 'r': e.preventDefault(); loadFreshStream(); break;
+                case 'c': copyCurrentLink(); break;
+                case 'f': if(player) {{ e.preventDefault(); player.requestFullscreen(); }} break;
+                case ' ': e.preventDefault(); if(player) player.paused() ? player.play() : player.pause(); break;
+                case 'arrowleft': if(player) player.currentTime(player.currentTime() - 10); break;
+                case 'arrowright': if(player) player.currentTime(player.currentTime() + 10); break;
+            }}
+        }});
+
+        loadFreshStream();
+    </script>
 </body>
 </html>""")
 
 # =====================================================================================
+# HEALTH CHECK
+# =====================================================================================
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health():
-    return JSONResponse({"status": "ok"})
+    return JSONResponse({"status": "ok", "message": "PlayFlx YT Server Running"})
 
+# =====================================================================================
+# START SERVER
+# =====================================================================================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     uvicorn.run("app:app", host="0.0.0.0", port=port, log_level="info")
