@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+yt-dlp
+python-dotenv
+jinja2
+aiofiles
