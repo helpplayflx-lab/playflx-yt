@@ -1,17 +1,47 @@
 import os
+import base64
+import tempfile
 import uvicorn
 import yt_dlp
+import re
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse
-from fastapi.templating import Jinja2Templates
+from fastapi.responses import JSONResponse, HTMLResponse
 from dotenv import load_dotenv
 
 load_dotenv(".env")
 
 BASE_URL = os.getenv("BASE_URL", "https://playflx-yt.onrender.com")
+YOUTUBE_COOKIES = os.getenv("YOUTUBE_COOKIES", "")
 
 app = FastAPI()
-templates = Jinja2Templates(directory="templates")
+
+# =====================================================================================
+# VIDEO ID EXTRACTOR
+# =====================================================================================
+def extract_video_id(input_string):
+    """YouTube URL ya direct ID se video ID extract karein"""
+    
+    # Agar sirf ID hai (11 characters, alphanumeric + _ -)
+    if re.match(r'^[a-zA-Z0-9_-]{11}$', input_string.strip()):
+        return input_string.strip()
+    
+    # YouTube URL patterns
+    patterns = [
+        r'youtube\.com/watch\?v=([a-zA-Z0-9_-]{11})',      # Standard watch
+        r'youtu\.be/([a-zA-Z0-9_-]{11})',                    # Short link
+        r'youtube\.com/embed/([a-zA-Z0-9_-]{11})',           # Embed
+        r'youtube\.com/shorts/([a-zA-Z0-9_-]{11})',          # Shorts
+        r'youtube\.com/v/([a-zA-Z0-9_-]{11})',               # Old embed
+        r'youtube\.com/live/([a-zA-Z0-9_-]{11})',            # Live
+        r'youtube\.com/watch.*[&?]v=([a-zA-Z0-9_-]{11})',   # With other params
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, input_string)
+        if match:
+            return match.group(1)
+    
+    return None
 
 # =====================================================================================
 # HOME PAGE
@@ -28,8 +58,8 @@ async def home():
     <style>
         body { background: #0a0a0a; color: white; font-family: system-ui; }
         .card { background: #1a1a1a; border-radius: 16px; padding: 30px; }
-        input { background: #2a2a2a; border: 1px solid #444; color: white; padding: 14px 20px; border-radius: 10px; width: 100%; font-size: 16px; }
-        input:focus { outline: none; border-color: #6366f1; }
+        input, textarea { background: #2a2a2a; border: 1px solid #444; color: white; padding: 14px 20px; border-radius: 10px; width: 100%; font-size: 16px; }
+        input:focus, textarea:focus { outline: none; border-color: #6366f1; }
         .btn { padding: 14px 30px; border-radius: 10px; font-weight: 600; cursor: pointer; border: none; transition: all 0.3s; }
         .btn-primary { background: #6366f1; color: white; }
         .btn-primary:hover { background: #4f46e5; transform: translateY(-2px); }
@@ -37,38 +67,38 @@ async def home():
         .btn-success:hover { background: #16a34a; }
         .result-box { background: #1a1a1a; border-radius: 12px; padding: 20px; margin-top: 20px; display: none; }
         .link-input { font-family: monospace; font-size: 13px; padding: 10px; }
+        .example-btn { background: none; border: 1px solid #444; color: #aaa; padding: 5px 12px; border-radius: 15px; cursor: pointer; font-size: 12px; margin: 2px; }
+        .example-btn:hover { background: #333; color: white; }
     </style>
 </head>
 <body class="min-h-screen flex flex-col">
     <header class="p-6 text-center">
         <h1 class="text-3xl font-bold text-indigo-400">▶️ PlayFlx YouTube</h1>
-        <p class="text-gray-400 mt-2">Get Direct MP4 Links — Use in Any Player!</p>
+        <p class="text-gray-400 mt-2">Paste any YouTube link — Get Direct MP4!</p>
     </header>
     
     <main class="flex-grow flex items-center justify-center px-4">
         <div class="max-w-2xl w-full">
             <div class="card">
-                <h2 class="text-xl font-semibold mb-4">🎬 Get Video Link</h2>
-                <p class="text-gray-400 mb-3 text-sm">Enter YouTube URL or Video ID</p>
+                <h2 class="text-xl font-semibold mb-4">🎬 Paste YouTube Link</h2>
+                <p class="text-gray-400 mb-3 text-sm">Full URL ya sirf Video ID — dono chalega!</p>
                 
-                <div class="flex gap-3 mb-3">
-                    <input type="text" id="videoInput" placeholder="dQw4w9WgXcQ or paste full URL" value="dQw4w9WgXcQ">
-                    <button class="btn btn-primary" onclick="getLink()">Get Link</button>
-                </div>
+                <textarea id="videoInput" rows="3" placeholder="Paste YouTube link here...
+e.g., https://www.youtube.com/watch?v=dQw4w9WgXcQ
+or just: dQw4w9WgXcQ"></textarea>
                 
-                <div class="flex gap-2 text-xs text-gray-500">
-                    <span>Examples:</span>
-                    <button class="text-indigo-400 hover:underline" onclick="setInput('dQw4w9WgXcQ')">Rick Astley</button>
-                    <button class="text-indigo-400 hover:underline" onclick="setInput('kJQP7kiw5Fk')">Despacito</button>
-                    <button class="text-indigo-400 hover:underline" onclick="setInput('JGwWNGJdvx8')">Shape of You</button>
+                <button class="btn btn-primary w-full mt-3" onclick="getLink()">🎯 Get Direct Link</button>
+                
+                <div class="mt-3 text-xs text-gray-500">
+                    <span>Examples: </span>
+                    <button class="example-btn" onclick="setAndGet('https://www.youtube.com/watch?v=dQw4w9WgXcQ')">Rick Astley</button>
+                    <button class="example-btn" onclick="setAndGet('https://youtu.be/kJQP7kiw5Fk')">Despacito</button>
+                    <button class="example-btn" onclick="setAndGet('JGwWNGJdvx8')">Shape of You</button>
                 </div>
             </div>
             
             <div id="loadingBox" class="text-center mt-4" style="display:none;">
-                <div class="spinner-border text-indigo-400" role="status">
-                    <span class="visually-hidden">Loading...</span>
-                </div>
-                <p class="text-gray-400 mt-2">Fetching video info...</p>
+                <p class="text-indigo-400">⏳ Fetching video...</p>
             </div>
             
             <div id="resultBox" class="result-box">
@@ -77,7 +107,7 @@ async def home():
                 
                 <div class="space-y-3">
                     <div>
-                        <label class="text-xs text-gray-500">🔗 Direct MP4 Link (Expires ~6h):</label>
+                        <label class="text-xs text-gray-500">🔗 Direct MP4 Link:</label>
                         <div class="flex gap-2 mt-1">
                             <input type="text" id="mp4Link" class="link-input" readonly>
                             <button class="btn btn-success" onclick="copyText('mp4Link')">Copy</button>
@@ -85,11 +115,11 @@ async def home():
                     </div>
                     
                     <div>
-                        <label class="text-xs text-gray-500">📋 Permanent Watch Link:</label>
+                        <label class="text-xs text-gray-500">📋 Permanent Watch Link (Never Expires):</label>
                         <div class="flex gap-2 mt-1">
                             <input type="text" id="watchLink" class="link-input" readonly>
                             <button class="btn btn-success" onclick="copyText('watchLink')">Copy</button>
-                            <a id="watchBtn" href="#" target="_blank" class="btn btn-primary">Open</a>
+                            <a id="watchBtn" href="#" target="_blank" class="btn btn-primary">▶ Open</a>
                         </div>
                     </div>
                     
@@ -99,48 +129,52 @@ async def home():
                     </div>
                 </div>
             </div>
+            
+            <div id="errorBox" class="mt-4 p-4 bg-red-900/30 border border-red-500 rounded-xl text-center" style="display:none;">
+                <p id="errorText" class="text-red-400"></p>
+            </div>
         </div>
     </main>
     
     <footer class="p-4 text-center text-gray-500 text-sm">
-        © 2025 PlayFlx • YouTube Direct Links
+        © 2025 PlayFlx
     </footer>
     
     <script>
-        function setInput(id) { document.getElementById('videoInput').value = id; getLink(); }
+        function setAndGet(input) {
+            document.getElementById('videoInput').value = input;
+            getLink();
+        }
         
         async function getLink() {
             const input = document.getElementById('videoInput').value.trim();
-            let videoId = input;
-            
-            if (input.includes('youtube.com/watch?v=')) videoId = input.split('v=')[1].split('&')[0];
-            else if (input.includes('youtu.be/')) videoId = input.split('/').pop().split('?')[0];
-            else if (input.includes('youtube.com/shorts/')) videoId = input.split('/shorts/')[1].split('?')[0];
-            
-            if (!videoId || videoId.length < 5) return alert('Invalid video ID!');
+            if (!input) return alert('Please paste a YouTube link or Video ID!');
             
             document.getElementById('loadingBox').style.display = 'block';
             document.getElementById('resultBox').style.display = 'none';
+            document.getElementById('errorBox').style.display = 'none';
             
             try {
-                const res = await fetch('/api/video/' + videoId);
+                const res = await fetch('/api/video?url=' + encodeURIComponent(input));
                 const data = await res.json();
                 
                 document.getElementById('loadingBox').style.display = 'none';
                 
                 if (data.success) {
                     document.getElementById('videoTitle').textContent = data.title;
-                    document.getElementById('videoInfo').textContent = `⏱ ${data.duration}s | 🎬 ${data.quality || 'HD'}`;
+                    document.getElementById('videoInfo').textContent = `⏱ ${data.duration}s | 🎬 ${data.quality}`;
                     document.getElementById('mp4Link').value = data.mp4_url;
                     document.getElementById('watchLink').value = data.watch_url;
                     document.getElementById('watchBtn').href = data.watch_url;
                     document.getElementById('resultBox').style.display = 'block';
                 } else {
-                    alert('Error: ' + (data.error || 'Failed to get video'));
+                    document.getElementById('errorText').textContent = data.error || 'Failed to get video';
+                    document.getElementById('errorBox').style.display = 'block';
                 }
             } catch (e) {
                 document.getElementById('loadingBox').style.display = 'none';
-                alert('Network error: ' + e.message);
+                document.getElementById('errorText').textContent = 'Network error: ' + e.message;
+                document.getElementById('errorBox').style.display = 'block';
             }
         }
         
@@ -150,6 +184,11 @@ async def home():
             document.execCommand('copy');
             alert('✅ Copied!');
         }
+        
+        // Enter key se submit
+        document.addEventListener('keydown', function(e) {
+            if (e.ctrlKey && e.key === 'Enter') getLink();
+        });
     </script>
 </body>
 </html>""")
@@ -157,19 +196,52 @@ async def home():
 # =====================================================================================
 # API: GET VIDEO MP4 LINK
 # =====================================================================================
-@app.get("/api/video/{video_id}")
-async def get_video(video_id: str):
-    """Extract direct MP4 link using yt-dlp"""
+@app.get("/api/video")
+async def get_video(url: str = ""):
+    """Extract direct MP4 link — full URL ya video ID dono support"""
+    
+    if not url:
+        return JSONResponse({"success": False, "error": "Please provide ?url= parameter"}, status_code=400)
+    
+    # Video ID extract karo
+    video_id = extract_video_id(url)
+    
+    if not video_id:
+        return JSONResponse({
+            "success": False, 
+            "error": "Could not extract Video ID. Please check the URL."
+        }, status_code=400)
+    
     try:
+        # Cookies setup
+        cookie_file = None
         ydl_opts = {
             'format': 'best[ext=mp4]/best',
             'quiet': True,
             'no_warnings': True,
         }
         
+        # Agar cookies env variable mein hain to use karo
+        if YOUTUBE_COOKIES:
+            try:
+                cookie_data = base64.b64decode(YOUTUBE_COOKIES).decode('utf-8')
+                cookie_file = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
+                cookie_file.write(cookie_data)
+                cookie_file.close()
+                ydl_opts['cookiefile'] = cookie_file.name
+            except Exception as e:
+                print(f"Cookie error: {e}")
+        
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(f'https://www.youtube.com/watch?v={video_id}', download=False)
             mp4_url = info.get('url', '')
+        
+        # Cleanup temp cookie file
+        if cookie_file:
+            try:
+                os.unlink(cookie_file.name)
+            except:
+                pass
         
         return JSONResponse({
             "success": True,
@@ -183,18 +255,35 @@ async def get_video(video_id: str):
         })
         
     except Exception as e:
+        error_msg = str(e)
+        # Cleanup on error
+        if cookie_file:
+            try:
+                os.unlink(cookie_file.name)
+            except:
+                pass
+        
         return JSONResponse({
             "success": False,
-            "error": str(e),
+            "error": error_msg,
+            "video_id": video_id,
             "watch_url": f"{BASE_URL}/watch/{video_id}"
         }, status_code=400)
 
 # =====================================================================================
-# DYNAMIC WATCH PAGE - AUTO-REFRESH PLAYER
+# API: GET VIDEO BY ID (legacy support)
+# =====================================================================================
+@app.get("/api/video/{video_id}")
+async def get_video_by_id(video_id: str):
+    """Legacy support — direct video ID"""
+    return await get_video(url=video_id)
+
+# =====================================================================================
+# DYNAMIC WATCH PAGE
 # =====================================================================================
 @app.get("/watch/{video_id}", response_class=HTMLResponse)
 async def watch_page(request: Request, video_id: str):
-    """Dynamic player — auto-updates link on every visit"""
+    """Dynamic player with auto-refresh"""
     return HTMLResponse(content=f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -319,7 +408,6 @@ async def watch_page(request: Request, video_id: str):
                 console.error('Load error:', e);
                 document.getElementById('status').style.display = 'none';
                 document.getElementById('errorBox').style.display = 'block';
-                
                 setTimeout(loadFreshStream, 5000);
             }}
         }}
@@ -329,8 +417,6 @@ async def watch_page(request: Request, video_id: str):
                 navigator.clipboard.writeText(currentMP4).then(() => {{
                     showToast('📋 MP4 Link copied!');
                 }});
-            }} else {{
-                showToast('⏳ Wait for stream to load...');
             }}
         }}
 
@@ -368,7 +454,7 @@ async def health():
     return JSONResponse({"status": "ok", "message": "PlayFlx YT Server Running"})
 
 # =====================================================================================
-# START SERVER
+# START
 # =====================================================================================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
