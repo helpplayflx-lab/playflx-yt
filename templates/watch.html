@@ -1,0 +1,11 @@
+<!DOCTYPE html>
+<html>
+<head><title>PlayFlx Player</title></head>
+<body style="margin:0;background:#000;">
+    <iframe width="100%" height="100%" style="border:none;min-height:100vh;" id="player"></iframe>
+    <script>
+        const id = window.location.pathname.split('/').pop();
+        document.getElementById('player').src = 'https://www.youtube.com/embed/' + id + '?autoplay=0&rel=0';
+    </script>
+</body>
+</html>
