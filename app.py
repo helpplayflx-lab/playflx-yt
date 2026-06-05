@@ -16,7 +16,7 @@ templates = Jinja2Templates(directory="templates")
 # =====================================================================================
 # HOME PAGE
 # =====================================================================================
-@app.get("/", response_class=HTMLResponse)
+@app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
 async def home():
     return HTMLResponse(content="""<!DOCTYPE html>
 <html lang="en">
