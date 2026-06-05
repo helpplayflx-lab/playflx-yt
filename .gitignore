@@ -1,1 +1,5 @@
-
+.env
+*.session
+__pycache__/
+*.pyc
+/tmp/
